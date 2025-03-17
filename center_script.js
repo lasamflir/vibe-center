@@ -405,7 +405,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const centerPos = Math.floor(boardSize / 2);
         for (const move of legalMoves) {
             if (move.row === centerPos && move.col === centerPos) {
-                // Winning move found - execute immediately
+                // Winning move found - update thoughts board first
+                thoughtsState = JSON.parse(JSON.stringify(boardState));
+                thoughtsState[centerPos][centerPos] = currentPlayer;
+                renderThoughtsBoard();
+                
+                // Then execute the move
                 botThinking = false;
                 thinkingInfoElement.textContent = `Found winning move immediately`;
                 executeMove(move.row, move.col);
@@ -490,16 +495,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Stop thinking and make move immediately
                     botThinking = false;
                     thinkingInfoElement.textContent = `Found forced win at depth ${depth}`;
+                    
+                    // Ensure the thoughts board shows at least the winning move if no other moves in PV
+                    // This is important when the winning move is to the center
+                    if (!result.principalVariation || result.principalVariation.length === 0) {
+                        thoughtsState = JSON.parse(JSON.stringify(boardState));
+                        thoughtsState[bestMove.row][bestMove.col] = currentPlayer;
+                        renderThoughtsBoard();
+                    }
+                    
                     executeMove(bestMove.row, bestMove.col);
-                    return;
-                }
-                
-                // If all moves lead to a loss, no need to search deeper
-                if (bestScore === -Infinity && result.allMovesLoseAtDepth) {
-                    console.log(`${playerColor} found forced loss at depth ${depth}, stopping deeper searches - Time used: ${elapsedTime}ms of ${timeLimit}ms`);
-                    foundForcedLoss = true;
-                    searchInfo.forcedLossDepth = depth;
-                    clearSearchAndMakeMove();
                     return;
                 }
             }
@@ -624,7 +629,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     nodesExplored,
                     foundForcedWin,
                     allMovesLoseAtDepth: false,
-                    principalVariation: [move] // Winning move is the only move in PV
+                    principalVariation: [move] // Explicitly include winning move in PV
                 };
             }
             
@@ -1027,73 +1032,91 @@ document.addEventListener('DOMContentLoaded', () => {
     // Evaluate a board position
     function evaluatePosition(board, player) {
         const opponent = player === 1 ? 2 : 1;
-        const centerPos = Math.floor(boardSize / 2);
-        let score = 0;
+        const centerPos = Math.floor(board.length / 2);
         
-        // Get legal moves for both players
-        const playerLegalMoves = [];
-        const opponentLegalMoves = [];
+        // Check if the center is empty and the opponent can play there
+        // This is a forced loss position - opponent can win on their next move
+        if (board[centerPos][centerPos] === 0 && isLegalMoveOnBoard(board, centerPos, centerPos, opponent)) {
+            return -Infinity; // Immediate loss, avoid at all costs
+        }
         
-        for (let row = 0; row < boardSize; row++) {
-            for (let col = 0; col < boardSize; col++) {
+        // Count legal moves for both players
+        let playerLegalMoves = 0;
+        let opponentLegalMoves = 0;
+        
+        // Count stones with visibility to center
+        let playerStonesWithCenterVisibility = 0;
+        let opponentStonesWithCenterVisibility = 0;
+        
+        for (let row = 0; row < board.length; row++) {
+            for (let col = 0; col < board.length; col++) {
+                // Count legal moves on empty cells
                 if (board[row][col] === 0) {
-                    // Calculate move value based on distance from center
-                    const distToCenter = Math.abs(row - centerPos) + Math.abs(col - centerPos);
-                    
-                    // Progressive bonus - square the value for moves closer to center
-                    // This creates a non-linear increase in value as we get closer to center
-                    const closenessToCenter = boardSize - distToCenter;
-                    const moveValue = closenessToCenter * closenessToCenter;
-                    
-                    // Check if move is legal for player
                     if (isLegalMoveOnBoard(board, row, col, player)) {
-                        playerLegalMoves.push({
-                            row,
-                            col,
-                            value: moveValue
-                        });
+                        playerLegalMoves++;
                     }
                     
-                    // Check if move is legal for opponent
                     if (isLegalMoveOnBoard(board, row, col, opponent)) {
-                        opponentLegalMoves.push({
-                            row,
-                            col,
-                            value: moveValue
-                        });
+                        opponentLegalMoves++;
                     }
+                } 
+                // Count stones with visibility to center
+                else if (board[row][col] === player && canSeeCenterOnBoard(board, row, col)) {
+                    playerStonesWithCenterVisibility++;
+                } 
+                else if (board[row][col] === opponent && canSeeCenterOnBoard(board, row, col)) {
+                    opponentStonesWithCenterVisibility++;
                 }
             }
         }
         
-        // Calculate weighted mobility scores
-        let playerMobilityScore = 0;
-        let opponentMobilityScore = 0;
+        // Calculate mobility score (main component)
+        const mobilityScore = playerLegalMoves - opponentLegalMoves;
+        const mobilityScoreWeight = 1000; // Stronger weight compared to center visibility
         
-        playerLegalMoves.forEach(move => {
-            playerMobilityScore += move.value;
+        // Calculate center visibility score (secondary component with lower weight)
+        const centerVisibilityDifference = playerStonesWithCenterVisibility - opponentStonesWithCenterVisibility;
+        const centerVisibilityWeight = 1; // Weaker weight compared to mobility
+        
+        // Return combined score
+        return (mobilityScore * mobilityScoreWeight) + (centerVisibilityDifference * centerVisibilityWeight);
+    }
+    
+    // Helper function to check if a position on a given board can see the center
+    function canSeeCenterOnBoard(board, row, col) {
+        const centerPos = Math.floor(board.length / 2);
+        
+        // If this is the center itself, return false
+        if (row === centerPos && col === centerPos) {
+            return false;
+        }
+        
+        // Check all 8 directions
+        const directions = [
+            [-1, -1], [-1, 0], [-1, 1],  // NW, N, NE
+            [0, -1],           [0, 1],    // W, E
+            [1, -1],  [1, 0],  [1, 1]     // SW, S, SE
+        ];
+        
+        for (const [dr, dc] of directions) {
+            let r = row + dr;
+            let c = col + dc;
             
-            // Center move is critically important - special bonus
-            const distToCenter = Math.abs(move.row - centerPos) + Math.abs(move.col - centerPos);
-            if (distToCenter === 0) {
-                playerMobilityScore += boardSize * boardSize * 2; // Much higher bonus for center move
+            while (r >= 0 && r < board.length && c >= 0 && c < board.length) {
+                if (r === centerPos && c === centerPos) {
+                    return true; // Can see the center
+                }
+                
+                if (board[r][c] !== 0) {
+                    break; // Blocked by a piece
+                }
+                
+                r += dr;
+                c += dc;
             }
-        });
+        }
         
-        opponentLegalMoves.forEach(move => {
-            opponentMobilityScore += move.value;
-            
-            // Center move is critically important - special bonus
-            const distToCenter = Math.abs(move.row - centerPos) + Math.abs(move.col - centerPos);
-            if (distToCenter === 0) {
-                opponentMobilityScore += boardSize * boardSize * 2; // Much higher bonus for center move
-            }
-        });
-        
-        // Final score combines mobility and restricts opponent's mobility
-        score = playerMobilityScore - 1.5 * opponentMobilityScore;
-        
-        return score;
+        return false; // Can't see the center from any direction
     }
     
     function isLegalMove(row, col, player) {
